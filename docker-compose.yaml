@@ -1,0 +1,20 @@
+services:
+  beets:
+    image: linuxserver/beets:latest
+    container_name: beets-tagger
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - GENIUS_API_KEY=${GENIUS_API_KEY:-}
+      - MUSIXMATCH_API_KEY=${MUSIXMATCH_API_KEY:-}
+    volumes:
+      - ./config:/config
+      - /home/buzz/services/music_dl/downloads/82f8b3e5-5536-4c5c-8b90-bc1713807e6e:/music
+      - ./output/fixed:/fixed
+      - ./output/failed:/failed
+      - ./output/all:/all
+      - ./process.sh:/process.sh:ro
+    entrypoint: ["/bin/bash", "/process.sh"]
+    restart: unless-stopped
+    env_file:
+      - .env          # optional — loads from .env file if present

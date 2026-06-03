@@ -1,0 +1,53 @@
+directory: /fixed
+library: /config/library.db
+
+import:
+  move: yes
+  copy: no
+  write: yes
+  log: /config/import.log
+  timid: no
+  quiet: yes
+  autotag: yes
+  incremental: yes
+
+match:
+  strong_rec_thresh: 0.10
+  medium_rec_thresh: 0.25
+
+plugins:
+  - lyrics
+  - fetchart
+  - lastgenre
+  - mbsync
+  - duplicates
+
+lyrics:
+  auto: yes
+  sources: [genius, azlyrics]
+  genius_api_key: ${GENIUS_API_KEY}
+  musixmatch_api_key: ${MUSIXMATCH_API_KEY}
+  fallback: ""
+  force: no
+
+fetchart:
+  auto: yes
+  minwidth: 300
+  maxwidth: 1200
+  quality: 80
+  sources: [itunes, coverart, amazon, albumart]
+
+lastgenre:
+  auto: yes
+  count: 1
+  prefer_specific: yes
+  canonical: yes
+  source: album
+
+paths:
+  default: $albumartist/$album%if{$year, ($year)}/$track - $title
+  singleton: Non-Album/$artist - $title
+  comp: Compilations/$album%if{$year, ($year)}/$track - $title
+
+ui:
+  color: no         # no ANSI colors in log output
