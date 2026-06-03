@@ -23,6 +23,8 @@ match:
 plugins:
   # Prefer actual-audio fingerprint matching before filename/metadata heuristics.
   - chroma
+  # Required with chroma so AcoustID fingerprint hits become MusicBrainz import candidates.
+  - musicbrainz
   # Keep filename parsing available as a fallback for files AcoustID cannot identify.
   - fromfilename
   - lyrics
