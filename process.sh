@@ -18,11 +18,11 @@ if ! command -v inotifywait &>/dev/null; then
     || { echo "ERROR: cannot install inotify-tools"; exit 1; }
 fi
 
-# The Docker image should provide fpcalc via chromaprint-tools. Warn loudly if it
-# is missing because Beets' chroma plugin cannot fingerprint audio without it.
+# The Docker image should provide fpcalc via chromaprint. Warn loudly if it is
+# missing because Beets' chroma plugin cannot fingerprint audio without it.
 if ! command -v fpcalc &>/dev/null; then
   echo "WARNING: fpcalc was not found. Fingerprint matching is disabled."
-  echo "         Rebuild the container image so chromaprint-tools is installed."
+  echo "         Rebuild the container image so chromaprint is installed."
 fi
 
 # ── Clean YouTube-style filenames ─────────────────────────────────────────────
@@ -69,7 +69,12 @@ clean_filename() {
 
 import_with_beets() {
   local file="$1"
-  beet import -q "$file" >> "$LOG" 2>&1 || true
+
+  # These downloads are individual tracks, not albums. Singleton mode lets Beets
+  # match the track recording directly with chroma/AcoustID instead of treating
+  # each file as a one-track album candidate. --incremental-skip-later keeps
+  # skipped files retryable on future runs after config/dependency changes.
+  beet import -s -q --incremental-skip-later "$file" >> "$LOG" 2>&1 || true
 }
 
 fixed_count() {
@@ -145,7 +150,7 @@ process_file() {
   # altering the filename. This avoids making filename text the primary signal.
   local before_count
   before_count=$(fixed_count)
-  echo "  → Trying fingerprint-based Beets import"
+  echo "  → Trying fingerprint-based singleton Beets import"
   import_with_beets "$file"
 
   local after_count

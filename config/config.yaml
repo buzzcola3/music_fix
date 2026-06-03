@@ -10,6 +10,8 @@ import:
   quiet: yes
   autotag: yes
   incremental: yes
+  incremental_skip_later: yes
+  from_scratch: yes
 
 match:
   strong_rec_thresh: 0.10
