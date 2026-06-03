@@ -18,37 +18,209 @@ if ! command -v inotifywait &>/dev/null; then
     || { echo "ERROR: cannot install inotify-tools"; exit 1; }
 fi
 
+# ── Startup verification ──────────────────────────────────────────────────────
+STARTUP_CHECK_FAILED=0
+STARTUP_CHECK_WARNED=0
+
+startup_pass() {
+  echo "  ✓ $1"
+}
+
+startup_warn() {
+  echo "  ! $1"
+  STARTUP_CHECK_WARNED=1
+}
+
+startup_fail() {
+  echo "  ✗ $1"
+  STARTUP_CHECK_FAILED=1
+}
+
+check_command() {
+  local cmd="$1"
+  local help="$2"
+
+  if command -v "$cmd" &>/dev/null; then
+    startup_pass "$cmd found: $(command -v "$cmd")"
+  else
+    startup_fail "$cmd missing - $help"
+  fi
+}
+
+check_writable_dir() {
+  local dir="$1"
+
+  if [[ ! -d "$dir" ]]; then
+    startup_fail "$dir missing or not mounted"
+    return
+  fi
+
+  if [[ ! -w "$dir" ]]; then
+    startup_fail "$dir is not writable"
+    return
+  fi
+
+  startup_pass "$dir exists and is writable"
+}
+
+check_beets_plugins() {
+  local version_output
+  version_output="$(beet version 2>&1 || true)"
+  local plugins_line
+  plugins_line="$(printf '%s\n' "$version_output" | awk '/^plugins:/ {print; exit}')"
+
+  if printf '%s\n' "$version_output" | grep -q '^beets version '; then
+    startup_pass "$(printf '%s\n' "$version_output" | awk '/^beets version / {print; exit}')"
+  else
+    startup_fail "beet version did not run successfully"
+    printf '%s\n' "$version_output" | sed 's/^/    /'
+    return
+  fi
+
+  if [[ -z "$plugins_line" ]]; then
+    startup_fail "beet version did not report loaded plugins"
+    return
+  fi
+
+  echo "  beet plugins: ${plugins_line#plugins: }"
+
+  for plugin in chroma musicbrainz fromfilename; do
+    if printf '%s\n' "$plugins_line" | grep -Eq "(^|[,[:space:]])${plugin}([,[:space:]]|$)"; then
+      startup_pass "required Beets plugin loaded: $plugin"
+    else
+      startup_fail "required Beets plugin not loaded: $plugin"
+    fi
+  done
+}
+
+check_beets_config() {
+  if [[ ! -f /config/config.yaml ]]; then
+    startup_fail "/config/config.yaml missing"
+    return
+  fi
+  startup_pass "/config/config.yaml mounted"
+
+  local config_output
+  config_output="$(beet config 2>&1 || true)"
+
+  if printf '%s\n' "$config_output" | grep -q '^plugins:'; then
+    startup_pass "beet config loaded"
+  else
+    startup_fail "beet config did not load correctly"
+    printf '%s\n' "$config_output" | sed 's/^/    /'
+    return
+  fi
+
+  for plugin in chroma musicbrainz fromfilename; do
+    if printf '%s\n' "$config_output" | grep -Eq "^- ${plugin}$"; then
+      startup_pass "config enables plugin: $plugin"
+    else
+      startup_fail "config does not enable plugin: $plugin"
+    fi
+  done
+
+  if printf '%s\n' "$config_output" | grep -q '^    apikey: .\+'; then
+    startup_pass "beet config has an AcoustID API key value"
+  else
+    startup_fail "beet config does not show an AcoustID API key value"
+  fi
+}
+
+check_pyacoustid() {
+  local output
+  if output="$(python3 - <<'PY' 2>&1
+import acoustid
+print(getattr(acoustid, '__version__', 'unknown'))
+PY
+)"; then
+    startup_pass "pyacoustid import OK: $output"
+  else
+    startup_fail "pyacoustid import failed"
+    printf '%s\n' "$output" | sed 's/^/    /'
+  fi
+}
+
+check_fpcalc_smoke_test() {
+  local sample=""
+
+  sample="$(find "$FAILED" "$INPUT" -type f 2>/dev/null | grep -Ei "\.($SUPPORTED_EXT)$" | head -n 1 || true)"
+  if [[ -z "$sample" ]]; then
+    startup_warn "no audio sample found in $FAILED or $INPUT for fpcalc smoke test"
+    return
+  fi
+
+  echo "  smoke sample: $sample"
+
+  local output status
+  if command -v timeout &>/dev/null; then
+    output="$(timeout 30 fpcalc "$sample" 2>&1)" || status=$?
+  else
+    output="$(fpcalc "$sample" 2>&1)" || status=$?
+  fi
+  status="${status:-0}"
+
+  if [[ "$status" -eq 0 ]] && printf '%s\n' "$output" | grep -q '^FINGERPRINT='; then
+    local duration
+    duration="$(printf '%s\n' "$output" | awk -F= '/^DURATION=/ {print $2; exit}')"
+    startup_pass "fpcalc smoke test produced a fingerprint${duration:+, duration ${duration}s}"
+  else
+    startup_fail "fpcalc smoke test failed for sample audio"
+    printf '%s\n' "$output" | sed 's/^/    /'
+  fi
+}
+
 startup_diagnostics() {
-  echo "[startup] Fingerprint stack diagnostics:"
+  echo "[startup] Full Beets/Chromaprint/AcoustID verification:"
+
+  check_command beet "Beets must be installed in the image"
+  check_command fpcalc "install chromaprint in the image"
+  check_command ffmpeg "install ffmpeg so fpcalc can decode downloaded audio"
+  check_command python3 "Python is required for pyacoustid"
+  check_command inotifywait "inotify-tools is required for folder watching"
+
+  check_writable_dir /config
+  check_writable_dir "$INPUT"
+  check_writable_dir "$FIXED"
+  check_writable_dir "$FAILED"
+  check_writable_dir "$ALL"
 
   if command -v beet &>/dev/null; then
-    beet version 2>&1 | sed 's/^/  beet: /' || true
-  else
-    echo "  beet: MISSING"
+    check_beets_plugins
+    check_beets_config
+  fi
+
+  if command -v python3 &>/dev/null; then
+    check_pyacoustid
   fi
 
   if command -v fpcalc &>/dev/null; then
-    fpcalc -version 2>&1 | sed 's/^/  fpcalc: /' || true
-  else
-    echo "  fpcalc: MISSING - rebuild the image so chromaprint is installed"
+    fpcalc -version 2>&1 | sed 's/^/  fpcalc version: /' || startup_fail "fpcalc version check failed"
   fi
 
   if command -v ffmpeg &>/dev/null; then
-    ffmpeg -version 2>&1 | head -n 1 | sed 's/^/  ffmpeg: /' || true
-  else
-    echo "  ffmpeg: MISSING - fpcalc may not decode some audio files"
-  fi
-
-  if python3 -c 'import acoustid; print("pyacoustid OK")' 2>/dev/null; then
-    python3 -c 'import acoustid; print("  " + acoustid.__name__ + ": OK")' || true
-  else
-    echo "  pyacoustid: MISSING - Beets chroma cannot query AcoustID"
+    ffmpeg -version 2>&1 | head -n 1 | sed 's/^/  ffmpeg version: /' || startup_fail "ffmpeg version check failed"
   fi
 
   if [[ -z "${ACOUSTID_API_KEY:-}" ]]; then
-    echo "  ACOUSTID_API_KEY: not set - lookups may be rate-limited or unavailable"
+    startup_fail "ACOUSTID_API_KEY is missing"
   else
-    echo "  ACOUSTID_API_KEY: set"
+    startup_pass "ACOUSTID_API_KEY is set"
+  fi
+
+  if command -v fpcalc &>/dev/null; then
+    check_fpcalc_smoke_test
+  fi
+
+  if [[ "$STARTUP_CHECK_FAILED" -ne 0 ]]; then
+    echo "[startup] ERROR: one or more required startup checks failed; refusing to process files."
+    echo "[startup] Fix the failed checks above, rebuild/recreate the container, and restart."
+    exit 1
+  fi
+
+  if [[ "$STARTUP_CHECK_WARNED" -ne 0 ]]; then
+    echo "[startup] Startup checks passed with warnings."
+  else
+    echo "[startup] All startup checks passed."
   fi
 }
 

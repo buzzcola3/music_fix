@@ -1,5 +1,5 @@
 services:
-  beets:
+  beets-tagger:
     build: .
     image: music-fix-beets:latest
     container_name: beets-tagger
@@ -18,5 +18,15 @@ services:
       - ./process.sh:/process.sh:ro
     entrypoint: ["/bin/bash", "/process.sh"]
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "command -v beet >/dev/null && command -v fpcalc >/dev/null && command -v ffmpeg >/dev/null && python3 -c 'import acoustid' && test -n \"$${ACOUSTID_API_KEY}\" && beet version | grep -q chroma && beet version | grep -q musicbrainz"
+        ]
+      interval: 1m
+      timeout: 20s
+      retries: 3
+      start_period: 30s
     env_file:
       - .env          # optional — loads from .env file if present
