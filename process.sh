@@ -87,17 +87,32 @@ mirror_new_fixed_files() {
 
 move_to_failed() {
   local file="$1"
-  local rel_path="${file#$INPUT/}"
+  local source_root="${2:-$INPUT}"
+  local rel_path="${file#$source_root/}"
   local failed_dest="$FAILED/$rel_path"
   local all_dest="$ALL/failed/$rel_path"
+
   mkdir -p "$(dirname "$failed_dest")" "$(dirname "$all_dest")"
+
+  # If this file was already in /failed during a startup re-run, keep it there
+  # instead of trying to move it onto itself. Refresh the /all/failed mirror.
+  if [[ "$file" == "$failed_dest" ]]; then
+    cp "$file" "$all_dest"
+    return
+  fi
+
   mv "$file" "$failed_dest"
   cp "$failed_dest" "$all_dest"
+}
+
+cleanup_empty_dirs() {
+  find "$INPUT" "$FAILED" -mindepth 1 -type d -empty -delete 2>/dev/null || true
 }
 
 # ── Process a single file ─────────────────────────────────────────────────────
 process_file() {
   local file="$1"
+  local source_root="${2:-$INPUT}"
   local filename
   filename="$(basename "$file")"
 
@@ -119,6 +134,10 @@ process_file() {
   filename="$(basename "$file")"
   echo "[$(date '+%H:%M:%S')] Processing: $filename"
 
+  if [[ "$source_root" == "$FAILED" ]]; then
+    echo "  → Re-running analysis from /failed"
+  fi
+
   # Touch log so -newer comparison works reliably
   touch "$LOG"
 
@@ -134,7 +153,7 @@ process_file() {
   if [[ "$after_count" -gt "$before_count" ]]; then
     echo "  ✓ Fingerprint/metadata match tagged and moved to /fixed"
     mirror_new_fixed_files
-    find "$INPUT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    cleanup_empty_dirs
     return
   fi
 
@@ -152,32 +171,48 @@ process_file() {
     if [[ "$after_count" -gt "$before_count" ]]; then
       echo "  ✓ Filename fallback tagged and moved to /fixed"
       mirror_new_fixed_files
-      find "$INPUT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+      cleanup_empty_dirs
       return
     fi
   fi
 
-  # Beets did not move it — move to /failed manually if it still exists.
+  # Beets did not move it — move new input files to /failed, or leave existing
+  # failed files in place so they can be retried again on the next container run.
   if [[ -f "$file" ]]; then
-    move_to_failed "$file"
-    echo "  ✗ No match — moved to /failed"
+    move_to_failed "$file" "$source_root"
+    if [[ "$source_root" == "$FAILED" ]]; then
+      echo "  ✗ Still no match — left in /failed for future retries"
+    else
+      echo "  ✗ No match — moved to /failed"
+    fi
   else
     echo "  ✗ No match and source file is missing — check $LOG"
   fi
 
-  # Remove now-empty subdirs from input
-  find "$INPUT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  cleanup_empty_dirs
 }
 
-# ── Process any files already in /input on startup ───────────────────────────
-echo "[startup] Scanning for existing files in $INPUT..."
-while IFS= read -r -d '' file; do
-  process_file "$file"
-done < <(find "$INPUT" -type f -print0)
+process_existing_tree() {
+  local root="$1"
+  local label="$2"
+
+  if [[ ! -d "$root" ]]; then
+    return
+  fi
+
+  echo "[startup] Scanning for existing files in $label..."
+  while IFS= read -r -d '' file; do
+    process_file "$file" "$root"
+  done < <(find "$root" -type f -print0)
+}
+
+# ── Process files already present on startup ──────────────────────────────────
+process_existing_tree "$INPUT" "$INPUT"
+process_existing_tree "$FAILED" "$FAILED"
 
 # ── Watch for new files ───────────────────────────────────────────────────────
 echo "[watch] Monitoring $INPUT for new files..."
 inotifywait -m -r -e close_write -e moved_to --format '%w%f' "$INPUT" \
 | while IFS= read -r filepath; do
-    process_file "$filepath"
+    process_file "$filepath" "$INPUT"
   done
