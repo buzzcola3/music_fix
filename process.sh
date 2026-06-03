@@ -18,12 +18,41 @@ if ! command -v inotifywait &>/dev/null; then
     || { echo "ERROR: cannot install inotify-tools"; exit 1; }
 fi
 
-# The Docker image should provide fpcalc via chromaprint. Warn loudly if it is
-# missing because Beets' chroma plugin cannot fingerprint audio without it.
-if ! command -v fpcalc &>/dev/null; then
-  echo "WARNING: fpcalc was not found. Fingerprint matching is disabled."
-  echo "         Rebuild the container image so chromaprint is installed."
-fi
+startup_diagnostics() {
+  echo "[startup] Fingerprint stack diagnostics:"
+
+  if command -v beet &>/dev/null; then
+    beet version 2>&1 | sed 's/^/  beet: /' || true
+  else
+    echo "  beet: MISSING"
+  fi
+
+  if command -v fpcalc &>/dev/null; then
+    fpcalc -version 2>&1 | sed 's/^/  fpcalc: /' || true
+  else
+    echo "  fpcalc: MISSING - rebuild the image so chromaprint is installed"
+  fi
+
+  if command -v ffmpeg &>/dev/null; then
+    ffmpeg -version 2>&1 | head -n 1 | sed 's/^/  ffmpeg: /' || true
+  else
+    echo "  ffmpeg: MISSING - fpcalc may not decode some audio files"
+  fi
+
+  if python3 -c 'import acoustid; print("pyacoustid OK")' 2>/dev/null; then
+    python3 -c 'import acoustid; print("  " + acoustid.__name__ + ": OK")' || true
+  else
+    echo "  pyacoustid: MISSING - Beets chroma cannot query AcoustID"
+  fi
+
+  if [[ -z "${ACOUSTID_API_KEY:-}" ]]; then
+    echo "  ACOUSTID_API_KEY: not set - lookups may be rate-limited or unavailable"
+  else
+    echo "  ACOUSTID_API_KEY: set"
+  fi
+}
+
+startup_diagnostics
 
 # ── Clean YouTube-style filenames ─────────────────────────────────────────────
 clean_filename() {
@@ -74,7 +103,8 @@ import_with_beets() {
   # match the track recording directly with chroma/AcoustID instead of treating
   # each file as a one-track album candidate. --incremental-skip-later keeps
   # skipped files retryable on future runs after config/dependency changes.
-  beet import -s -q --incremental-skip-later "$file" >> "$LOG" 2>&1 || true
+  # -v is intentional: it writes the real Beets/chroma reason to /config/import.log.
+  beet -v import -s -q --incremental-skip-later "$file" >> "$LOG" 2>&1 || true
 }
 
 fixed_count() {
@@ -167,7 +197,7 @@ process_file() {
   if [[ -f "$file" ]]; then
     file=$(clean_filename "$file")
     filename="$(basename "$file")"
-    echo "  → No fingerprint match; retrying with cleaned filename: $filename"
+    echo "  → No automatic import; retrying with cleaned filename: $filename"
 
     before_count=$(fixed_count)
     import_with_beets "$file"
@@ -186,10 +216,11 @@ process_file() {
   if [[ -f "$file" ]]; then
     move_to_failed "$file" "$source_root"
     if [[ "$source_root" == "$FAILED" ]]; then
-      echo "  ✗ Still no match — left in /failed for future retries"
+      echo "  ✗ Still no automatic import — left in /failed for future retries"
     else
-      echo "  ✗ No match — moved to /failed"
+      echo "  ✗ No automatic import — moved to /failed"
     fi
+    echo "    Check $LOG for the verbose Beets/chroma reason."
   else
     echo "  ✗ No match and source file is missing — check $LOG"
   fi

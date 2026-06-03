@@ -14,13 +14,15 @@ import:
   from_scratch: yes
 
 match:
-  strong_rec_thresh: 0.10
-  medium_rec_thresh: 0.25
+  # Be slightly more tolerant for YouTube/downloaded audio, which can include
+  # video edits, intros, outros, silence, or different mastering than the
+  # MusicBrainz release track.
+  strong_rec_thresh: 0.20
+  medium_rec_thresh: 0.45
 
 plugins:
   # Prefer actual-audio fingerprint matching before filename/metadata heuristics.
   - chroma
-  - musicbrainz
   # Keep filename parsing available as a fallback for files AcoustID cannot identify.
   - fromfilename
   - lyrics
