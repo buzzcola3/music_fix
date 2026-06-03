@@ -16,11 +16,25 @@ match:
   medium_rec_thresh: 0.25
 
 plugins:
+  # Prefer actual-audio fingerprint matching before filename/metadata heuristics.
+  - chroma
+  - musicbrainz
+  # Keep filename parsing available as a fallback for files AcoustID cannot identify.
+  - fromfilename
   - lyrics
   - fetchart
   - lastgenre
   - mbsync
   - duplicates
+
+chroma:
+  auto: yes
+
+acoustid:
+  apikey: ${ACOUSTID_API_KEY}
+
+musicbrainz:
+  extra_tags: [year, catalognum, country, media, label]
 
 lyrics:
   auto: yes

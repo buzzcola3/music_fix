@@ -10,12 +10,19 @@ SUPPORTED_EXT="mp3|flac|m4a|ogg|opus|wma|aac"
 
 mkdir -p "$FIXED" "$FAILED" "$ALL"
 
-# ── Install inotify-tools if not present ─────────────────────────────────────
+# ── Install runtime helpers if not present ────────────────────────────────────
 if ! command -v inotifywait &>/dev/null; then
   echo "[setup] Installing inotify-tools..."
   apt-get update -qq && apt-get install -y -qq inotify-tools 2>/dev/null \
     || apk add --no-cache inotify-tools 2>/dev/null \
     || { echo "ERROR: cannot install inotify-tools"; exit 1; }
+fi
+
+# The Docker image should provide fpcalc via chromaprint-tools. Warn loudly if it
+# is missing because Beets' chroma plugin cannot fingerprint audio without it.
+if ! command -v fpcalc &>/dev/null; then
+  echo "WARNING: fpcalc was not found. Fingerprint matching is disabled."
+  echo "         Rebuild the container image so chromaprint-tools is installed."
 fi
 
 # ── Clean YouTube-style filenames ─────────────────────────────────────────────
@@ -45,6 +52,12 @@ clean_filename() {
     -e 's/  */ /g' \
     -e 's/^ //g' -e 's/ $//g')
 
+  # Avoid renaming to an empty basename if a noisy filename is stripped entirely.
+  if [[ -z "$base" ]]; then
+    echo "$file"
+    return
+  fi
+
   local newfile="$dir/$base.$ext"
   if [[ "$file" != "$newfile" ]]; then
     mv "$file" "$newfile"
@@ -52,6 +65,34 @@ clean_filename() {
   else
     echo "$file"
   fi
+}
+
+import_with_beets() {
+  local file="$1"
+  beet import -q "$file" >> "$LOG" 2>&1 || true
+}
+
+fixed_count() {
+  find "$FIXED" -type f | wc -l
+}
+
+mirror_new_fixed_files() {
+  find "$FIXED" -type f -newer "$LOG" | while read -r tagged; do
+    local rel="${tagged#$FIXED/}"
+    local dest="$ALL/$rel"
+    mkdir -p "$(dirname "$dest")"
+    cp "$tagged" "$dest"
+  done
+}
+
+move_to_failed() {
+  local file="$1"
+  local rel_path="${file#$INPUT/}"
+  local failed_dest="$FAILED/$rel_path"
+  local all_dest="$ALL/failed/$rel_path"
+  mkdir -p "$(dirname "$failed_dest")" "$(dirname "$all_dest")"
+  mv "$file" "$failed_dest"
+  cp "$failed_dest" "$all_dest"
 }
 
 # ── Process a single file ─────────────────────────────────────────────────────
@@ -75,44 +116,53 @@ process_file() {
     sleep 2
   done
 
-  # Clean YouTube-style filename before passing to beets
-  file=$(clean_filename "$file")
   filename="$(basename "$file")"
-
   echo "[$(date '+%H:%M:%S')] Processing: $filename"
-
-  # Count files in /fixed before import
-  local before_count
-  before_count=$(find "$FIXED" -type f | wc -l)
 
   # Touch log so -newer comparison works reliably
   touch "$LOG"
 
-  # Run beets import on the single file
-  beet import -q "$file" >> "$LOG" 2>&1 || true
+  # First pass: let Beets identify the actual audio using chroma/AcoustID before
+  # altering the filename. This avoids making filename text the primary signal.
+  local before_count
+  before_count=$(fixed_count)
+  echo "  → Trying fingerprint-based Beets import"
+  import_with_beets "$file"
 
-  # Count files in /fixed after import
   local after_count
-  after_count=$(find "$FIXED" -type f | wc -l)
-
+  after_count=$(fixed_count)
   if [[ "$after_count" -gt "$before_count" ]]; then
-    # Beets matched and moved it to /fixed — mirror to /all
-    echo "  ✓ Tagged and moved to /fixed"
-    find "$FIXED" -type f -newer "$LOG" | while read -r tagged; do
-      local rel="${tagged#$FIXED/}"
-      local dest="$ALL/$rel"
-      mkdir -p "$(dirname "$dest")"
-      cp "$tagged" "$dest"
-    done
-  else
-    # Beets didn't move it — move to /failed manually
-    local rel_path="${file#$INPUT/}"
-    local failed_dest="$FAILED/$rel_path"
-    local all_dest="$ALL/failed/$rel_path"
-    mkdir -p "$(dirname "$failed_dest")" "$(dirname "$all_dest")"
-    mv "$file" "$failed_dest"
-    cp "$failed_dest" "$all_dest"
+    echo "  ✓ Fingerprint/metadata match tagged and moved to /fixed"
+    mirror_new_fixed_files
+    find "$INPUT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+    return
+  fi
+
+  # Second pass: clean noisy YouTube-style names and retry. This is only a
+  # fallback for files that AcoustID/MusicBrainz cannot confidently identify.
+  if [[ -f "$file" ]]; then
+    file=$(clean_filename "$file")
+    filename="$(basename "$file")"
+    echo "  → No fingerprint match; retrying with cleaned filename: $filename"
+
+    before_count=$(fixed_count)
+    import_with_beets "$file"
+    after_count=$(fixed_count)
+
+    if [[ "$after_count" -gt "$before_count" ]]; then
+      echo "  ✓ Filename fallback tagged and moved to /fixed"
+      mirror_new_fixed_files
+      find "$INPUT" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+      return
+    fi
+  fi
+
+  # Beets did not move it — move to /failed manually if it still exists.
+  if [[ -f "$file" ]]; then
+    move_to_failed "$file"
     echo "  ✗ No match — moved to /failed"
+  else
+    echo "  ✗ No match and source file is missing — check $LOG"
   fi
 
   # Remove now-empty subdirs from input
